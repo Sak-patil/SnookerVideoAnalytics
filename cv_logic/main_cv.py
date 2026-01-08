@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from table_geometry import TableGeometryEngine
-from database_config import get_db_connection
+from database.database_config import get_db_connection
 from datetime import datetime  # Added for TTL logic
 from threading import Thread # Added for background syncing
 
