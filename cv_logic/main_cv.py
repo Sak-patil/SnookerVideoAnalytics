@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from table_geometry import TableGeometryEngine
-from database_config import get_db_connection
+from backend.config.database_config import get_db_connection
 from datetime import datetime 
 from threading import Thread 
 from snooker_engine import SnookerEngine 
