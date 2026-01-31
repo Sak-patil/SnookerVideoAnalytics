@@ -2,32 +2,21 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from table_geometry import TableGeometryEngine
-from database_config import get_db_connection
+from backend.config.database_config import get_db_connection
 from datetime import datetime 
 from threading import Thread 
-from snooker_engine_topush import SnookerEngine 
-import time
+from snooker_engine import SnookerEngine 
 
 # --- DATABASE CONNECTION ---
+# Establish connection to MongoDB Atlas for cloud-based score tracking
 collection = get_db_connection()
 
 def sync_to_mongodb_async(packet):
+    """Offloads database insertion to a background thread to maintain video FPS."""
     try:
         collection.insert_one(packet)
     except Exception as e:
         print(f"Cloud Sync Error: {e}")
-
-def check_for_ui_start_signal():
-    """Checks MongoDB to see if the user clicked 'Y' on the website."""
-    # Access the control collection via the existing connection
-    db = collection.database 
-    signal = db.control_signals.find_one({"id": "ui_command"})
-    
-    if signal and signal.get("command") == "y":
-        # Clear the signal after reading so it doesn't loop
-        db.control_signals.update_one({"id": "ui_command"}, {"$set": {"command": None}})
-        return True
-    return False
 
 # --- ENGINE INITIALIZATION ---
 engine = TableGeometryEngine()
@@ -45,42 +34,27 @@ video_path = 'demo_snooker_video.mp4'
 cap = cv2.VideoCapture(video_path)
 frame_count = 0 
 last_sync_data = None 
-current_score = 0 
-is_start_confirmed = False  # Track if user clicked 'Y' in React
+current_score = 0      
 
+# PERFORMANCE: Process every N frames to optimize CPU/GPU usage
 process_every_n_frames = 2 
-
-print("🚀 SYSTEM STARTING: Waiting for 'Start' signal from Frontend Dashboard...")
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret: break
     frame_count += 1
 
-    # --- CALIBRATION & WAIT PHASE ---
-    if not is_start_confirmed:
-        # Check database for signal every 30 frames to save CPU
-        if frame_count % 30 == 0:
-            if check_for_ui_start_signal():
-                is_start_confirmed = True
-                print("✅ START SIGNAL RECEIVED: Beginning Match Analytics.")
-        
-        # Display instructions on screen
-        cv2.putText(frame, "WAITING FOR FRONTEND CONFIRMATION (Y)...", (50, 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.imshow("AI Broadcast Stream", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
-        continue # Skip processing until confirmed
-
-    # --- LIVE PROCESSING PHASE ---
+    # Main Processing Block
     if frame_count % process_every_n_frames == 0:
         mask, corners, view_status = engine.process_frame(frame)
         results = model.track(frame, conf=0.3, persist=True, verbose=False, imgsz=640)
         
         if engine.table_locked:
+            # Initialize scoring logic once table geometry is established
             if snooker_logic is None:
                 snooker_logic = SnookerEngine(engine.sort_corners(corners))
 
+            # Initialize 2D Mini-Map (Vertical 400x800)
             mini_map = np.zeros((800, 400, 3), dtype="uint8")
             mini_map[:] = (20, 80, 20) 
             
@@ -91,6 +65,7 @@ while cap.isOpened():
             balls_to_sync = [] 
             balls_for_logic = [] 
 
+            # Draw pocket indicators on the mini-map
             for px, py in snooker_logic.pockets:
                 cv2.circle(mini_map, (px, py), 30, (0, 255, 255), 2)
 
@@ -105,6 +80,7 @@ while cap.isOpened():
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                         label = model.names[b_cls]
 
+                        # Project ball position into 2D table space
                         pixel = np.array([[[cx, cy]]], dtype="float32")
                         transformed = cv2.perspectiveTransform(pixel, M)
                         mx, my = int(transformed[0][0][0]), int(transformed[0][0][1])
@@ -112,12 +88,14 @@ while cap.isOpened():
                         balls_for_logic.append({"id": b_id, "coords": (cx, cy), "label": label})
                         balls_to_sync.append({"label": label, "x": mx, "y": my})
                         
+                        # Render balls on the analytics mini-map
                         line_color = BALL_COLORS.get(label, (255, 255, 255))
                         cv2.circle(mini_map, (mx, my), 12, line_color, 2)
 
+            # Update score via logic engine
             current_score = snooker_logic.process_frame(balls_for_logic, src_pts)
 
-            # DATABASE SYNC
+            # DATABASE SYNC: Throttled to every 10 frames to reduce network traffic
             if frame_count % 10 == 0: 
                 if len(balls_to_sync) > 0 and balls_to_sync != last_sync_data:
                     data_packet = {
@@ -125,11 +103,13 @@ while cap.isOpened():
                         "balls": balls_to_sync,
                         "match_score": current_score 
                     }
+                    # Trigger background cloud sync
                     Thread(target=sync_to_mongodb_async, args=(data_packet,)).start()
                     last_sync_data = balls_to_sync
 
             cv2.imshow("2D Analytics Dashboard", mini_map)
     
+    # Overlay live scoreboard on the original video feed
     cv2.putText(frame, f"LIVE SCORE: {current_score}", (50, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
     cv2.imshow("AI Broadcast Stream", frame)
